@@ -1,0 +1,9 @@
+Team Name: TEAMBITJNexora
+Institute: Birla Institute of Technology, Mesra
+Team Members:
+  1. Anuj Sharma        - Team Leader, GIS and Remote Sensing
+  2. Abhishek Kumar     - Research and Data Gathering
+  3. Abhyudai Chauhan   - AI Analysis and ML Testing
+  4. Shikhar Gangwar    - GIS and Remote Sensing
+  5. Anshika Shukla     - Research and Data Gathering
+  6. Sai Srikar Dumpeti - Full Stack
