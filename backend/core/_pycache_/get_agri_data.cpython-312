@@ -1,0 +1,159 @@
+import requests
+import datetime
+
+def get_agri_data(lat, lon):
+    """
+    Fetches real environmental data and formats it into a specific agricultural dictionary.
+    """
+    
+    headers = {
+        'User-Agent': 'AgriDataScript/1.0',
+        'Accept': 'application/json'
+    }
+    
+    today = datetime.date.today()
+    date_end = today - datetime.timedelta(days=1)
+    date_start = date_end - datetime.timedelta(days=7)
+    
+    weather_url = "https://archive-api.open-meteo.com/v1/archive"
+    weather_params = {
+        "latitude": lat,
+        "longitude": lon,
+        "start_date": date_start,
+        "end_date": date_end,
+        "daily": [
+            "temperature_2m_max", "temperature_2m_min", "temperature_2m_mean",
+            "precipitation_sum", "et0_fao_evapotranspiration", 
+            "shortwave_radiation_sum", "vapor_pressure_deficit_max"
+        ],
+        "hourly": ["soil_moisture_0_to_7cm", "soil_moisture_7_to_28cm"],
+        "timezone": "auto"
+    }
+
+    tmin, tmax, tavg, prec, et0, vpd, rad = 0, 0, 0, 0, 0, 0, 0
+    ssm_val, rsm_val, cwb = 0, 0, 0
+
+    try:
+        w_res = requests.get(weather_url, params=weather_params, headers=headers).json()
+        daily = w_res.get('daily', {})
+        hourly = w_res.get('hourly', {})
+
+        def mean(lst): return sum(lst) / len(lst) if lst else 0
+        
+        # Temperature & Water
+        tmin = mean(daily.get('temperature_2m_min', [0]))
+        tmax = mean(daily.get('temperature_2m_max', [0]))
+        tavg = mean(daily.get('temperature_2m_mean', [0]))
+        prec = mean(daily.get('precipitation_sum', [0]))
+        et0 = mean(daily.get('et0_fao_evapotranspiration', [0]))
+        vpd = mean(daily.get('vapor_pressure_deficit_max', [0])) # kPa
+        
+        # Radiation: Open-Meteo is MJ/m². Convert to Joules (x 1,000,000)
+        rad_mj = mean(daily.get('shortwave_radiation_sum', [0]))
+        rad = rad_mj * 1_000_000
+        
+        # Soil Moisture
+        # SSM: Open-Meteo gives m³/m³ (e.g. 0.15). Convert to % (15.0)
+        ssm_raw = hourly.get('soil_moisture_0_to_7cm', [0])[-1]
+        ssm_val = ssm_raw * 100 
+        
+        # RSM: Open-Meteo gives m³/m³. User wants mm/m. 
+        # 1 m³/m³ = 1000 mm of water per meter of soil.
+        rsm_raw = hourly.get('soil_moisture_7_to_28cm', [0])[-1]
+        rsm_val = rsm_raw * 1000 
+        
+        # Climatic Water Balance
+        cwb = prec - et0
+
+    except Exception as e:
+        print(f"Weather API Error: {e}")
+
+    # ---------------------------------------------------------
+    # 2. Fetch Real Soil Physics (ISRIC SoilGrids)
+    # ---------------------------------------------------------
+    
+    # We query for Bulk Density, Field Capacity (33kPa), Wilting Point (1500kPa), Sand/Clay
+    soil_url = "https://rest.isric.org/soilgrids/v2.0/properties/query"
+    soil_params = {
+        "lat": lat,
+        "lon": lon,
+        "property": ["bdod", "wv_33", "wv_1500", "sand", "clay"],
+        "depth": ["0-5cm", "5-15cm", "15-30cm"],
+        "value": "mean"
+    }
+    
+    # Fallbacks for soil
+    bulk_density, awc_val, drainage_class = 1.45, 12.0, 3
+
+    try:
+        s_res = requests.get(soil_url, params=soil_params, headers=headers, timeout=10)
+        if s_res.status_code == 200:
+            layers = s_res.json()['properties']['layers']
+            
+            def get_layer_mean(layer_name):
+                vals = [l['values']['mean'] for l in layers if l['name'] == layer_name]
+                valid_vals = [v for sublist in vals for v in sublist if v is not None]
+                return sum(valid_vals)/len(valid_vals) if valid_vals else 0
+
+            # Bulk Density (cg/cm3 -> g/cm3)
+            bd_raw = get_layer_mean('bdod')
+            if bd_raw: bulk_density = bd_raw / 100.0
+            
+            # AWC = Field Capacity (wv_33) - Wilting Point (wv_1500)
+            # ISRIC units are Vol% * 10 (e.g. 300 = 30%)
+            fc = get_layer_mean('wv_33')
+            wp = get_layer_mean('wv_1500')
+            if fc and wp:
+                awc_val = (fc - wp) / 10.0 # Result in Volumetric %
+            
+            # Drainage Class based on Sand/Clay
+            sand = get_layer_mean('sand') / 10.0
+            clay = get_layer_mean('clay') / 10.0
+            
+            if sand > 70: drainage_class = 5      # Excessive
+            elif sand > 50: drainage_class = 4    # Well drained
+            elif clay > 40: drainage_class = 1    # Very poor (Clay)
+            elif clay > 25: drainage_class = 2    # Poor
+            else: drainage_class = 3              # Moderate
+    except Exception as e:
+        print(f"SoilGrids Error (using regional fallbacks): {e}")
+
+    # ---------------------------------------------------------
+    # 3. Heuristic for NDVI / FPAR (Since no free real-time API exists)
+    # ---------------------------------------------------------
+    # Logic: High NDVI if in monsoon (Jun-Sep) OR if recent rain > 10mm
+    month = datetime.date.today().month
+    is_monsoon = 6 <= month <= 9
+    
+    ndvi_est = 0.3 # Base (Dry/Fallow)
+    if is_monsoon: ndvi_est = 0.65
+    elif prec > 2.0: ndvi_est += 0.15 # Green up after rain
+    
+    if ndvi_est > 0.85: ndvi_est = 0.85
+    
+    # FPAR approximation derived from NDVI
+    fpar_est = (1.163 * ndvi_est) - 0.1426
+    fpar_est = max(0.0, min(0.95, fpar_est))
+
+    # ---------------------------------------------------------
+    # 4. Final Output Dictionary
+    # ---------------------------------------------------------
+    data = {
+        "awc": round(awc_val, 2),            # Available Water Capacity (%)
+        "bulk_density": round(bulk_density, 3), # g/cm3
+        "drainage_class": drainage_class,    # 1 (Poor) to 5 (High)
+        "ssm": round(ssm_val, 1),            # Surface Soil Moisture (%)
+        "rsm": round(rsm_val, 1),            # Root Zone Moisture (mm/m)
+        "ndvi": round(ndvi_est, 2),          # Est. Vegetation Index
+        "tmin": round(tmin, 1),              # Min Temp (°C)
+        "tmax": round(tmax, 1),              # Max Temp (°C)
+        "prec": round(prec, 1),              # Precipitation (mm)
+        "rad": round(rad, 1),                # Solar Radiation (Joules/m2)
+        "tavg": round(tavg, 1),              # Avg Temp (°C)
+        "et0": round(et0, 2),                # Evapotranspiration (mm/day)
+        "vpd": round(vpd, 2),                # Vapor Pressure Deficit (kPa)
+        "cwb": round(cwb, 2),                # Climatic Water Balance (mm)
+        "fpar": round(fpar_est, 2)           # Fraction of PAR
+    }
+    
+    return data

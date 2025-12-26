@@ -1,0 +1,2 @@
+CROPS = ["wheat", "maize"]
+

@@ -1,0 +1,19 @@
+from database import db
+
+def get_nearby_field(lat: float, lon: float, max_distance: int = 5000):
+  point = {
+      "type": "Point",
+      "coordinates": [lon, lat]
+  }
+
+
+  cursor = db["districts"].find_one({
+      "geometry": {
+          "$near": {
+              "$geometry": point,
+              "$maxDistance": max_distance
+          }
+      }
+  })
+
+  return cursor

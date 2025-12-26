@@ -1,0 +1,14 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.env
+wheat_yield_data.db
+24108069451-C2E-X-1-92-05Nov2021_FCC.tif
+24108069461-C2E-X-1-93-05Nov2021_FCC.tif
